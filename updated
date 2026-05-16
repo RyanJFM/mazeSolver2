@@ -1,0 +1,232 @@
+#include <SharpDistSensor.h>
+
+// determine pins
+
+// left motor
+const int PWMA = 5;
+const int AIN1 = 7;
+const int AIN2 = 8;
+// left motor encoder
+const int leftEncoderPhaseA = 2; // hardware interrupt 0
+const int leftEncoderPhaseB = 4; // direction logic 
+
+// right motor
+const int PWMB = 6;
+const int BIN1 = 9;
+const int BIN2 = 10;
+// right motor encoder
+const int rightEncoderPhaseA = 3;
+const int rightEncoderPhaseB = 11;
+
+// pwm signal speed for motors
+const int speed = 100;
+
+// encoder ticks
+volatile long leftTicks = 0;
+volatile long rightTicks = 0;
+
+// sharp IR
+SharpDistSensor sensorFront(A0, 5);
+SharpDistSensor sensorLeft(A2, 5);
+SharpDistSensor sensorRight(A1, 5);
+
+// sensor readings
+float frontDist = 0.0;
+float leftDist = 0.0;
+float rightDist = 0.0;
+
+// step size
+int n = 500;
+int m = 140;
+
+
+void setup() {
+  // initialize pins for motors
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  // Initialize encoder pins
+  pinMode(leftEncoderPhaseA, INPUT);
+  pinMode(leftEncoderPhaseB, INPUT);
+  pinMode(rightEncoderPhaseA, INPUT);
+  pinMode(rightEncoderPhaseB, INPUT);
+
+  // whenever the encoder ticks are rising pause the main code and run counting functions
+  attachInterrupt(digitalPinToInterrupt(leftEncoderPhaseA), countLeft, RISING);
+  attachInterrupt(digitalPinToInterrupt(rightEncoderPhaseA), countRight, RISING);
+
+  // set up sensors
+  sensorFront.setModel(SharpDistSensor::GP2Y0A51SK0F_5V_DS);
+  sensorLeft.setModel(SharpDistSensor::GP2Y0A51SK0F_5V_DS);
+  sensorRight.setModel(SharpDistSensor::GP2Y0A51SK0F_5V_DS);
+
+}
+
+void loop() {
+  //goForward();
+  //Brake();
+  //turnRight();
+  //Brake();
+  //goForward();
+  //Brake();
+  //turnLeft();
+  //Brake();
+
+  sensorReadings();
+  goForward();
+  resetEncoders();
+
+  if (frontDist < 8) {
+    turnRight();
+    resetEncoders();
+    delay(1000);
+  }
+
+}
+
+void goForward() {
+  
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  while (leftTicks < n && rightTicks < n) {
+
+    sensorReadings();
+    if (frontDist < 8.0) { 
+      break; 
+    }
+
+    int error = leftTicks - rightTicks;
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+
+      
+  }
+}
+
+void turnRight() {
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, HIGH);
+
+  while (leftTicks < m && abs(rightTicks) < m) {
+
+    int error = leftTicks - abs(rightTicks);
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+
+}
+
+void turnLeft() {
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  while (abs(leftTicks) < m && rightTicks < m) {
+
+    int error = abs(leftTicks) - rightTicks;
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+
+}
+
+void sensorReadings() {
+
+  float rawFront = sensorFront.getDist() / 10.0;
+  float rawLeft  = sensorLeft.getDist()  / 10.0;
+  float rawRight = sensorRight.getDist() / 10.0;
+
+  frontDist = mapFloat(rawFront, 5.25, 6.4, 6.0, 7.0);
+  leftDist  = mapFloat(rawLeft, 10.45, 11.8, 10.0, 11.0);
+  rightDist = mapFloat(rawRight, 7.3, 9.25, 8.0, 10.0);
+
+  // set condition for wall to not exist
+  if (frontDist > 14.0) {
+    frontDist = 999;
+  }
+  if (leftDist > 14.0) {
+    leftDist = 999;
+  }
+  if (rightDist > 14.0) {
+    rightDist = 999;
+  }
+
+}
+
+void Brake() {
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, HIGH);
+
+  // reset encoder values
+  leftTicks = 0;
+  rightTicks = 0;
+
+  delay(500);
+}
+
+void countLeft() {
+  // Check Phase B to see if we are going forward or backward
+  if (digitalRead(leftEncoderPhaseB) == HIGH) {
+    leftTicks++;
+  } else {
+    leftTicks--;
+  }
+}
+
+void countRight() {
+  // check if motor spin forward or backward
+  if (digitalRead(rightEncoderPhaseB) == HIGH) {
+    rightTicks++;
+  } else {
+    rightTicks--;
+  }
+}
+
+// sensor reading correction
+float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void resetEncoders() {
+  leftTicks = 0;
+  rightTicks = 0;
+}
+
