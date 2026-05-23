@@ -1,0 +1,138 @@
+void adjust() {
+  sensorReadings();
+
+
+  // =========================================================================
+  // CONDITION 2: ONLY RIGHT WALL PRESENT (Your Shimmy Logic)
+  // =========================================================================
+  if (leftDist == 999 && rightDist != 999) { 
+    while (true) {
+      // 1. Lean Right and measure
+      stepRight(calibrateStep);
+      delay(50); 
+      sensorReadings(); 
+      float tempRightDist1 = rightDist;
+
+      // 2. Lean Left (crossing center to the other side) and measure
+      stepLeft(calibrateStep * 2);
+      delay(50);
+      sensorReadings(); 
+      float tempRightDist2 = rightDist;
+
+      // 3. Return to our current center position
+      stepRight(calibrateStep);
+      delay(50);
+
+      // Calculate the slope
+      float diff = tempRightDist2 - tempRightDist1;
+
+      // SUCCESS CONDITION: Leaning left vs right yields the same distance
+      if (abs(diff) < 0.5) { 
+        break; 
+      }
+
+      // 4. Adjust our center line towards the shorter distance
+      if (diff > 0) {
+        stepRight(smallAdjustment);
+      } else if (diff < 0) {
+        stepLeft(smallAdjustment); 
+      }
+    }
+  }
+
+  // =========================================================================
+  // CONDITION 3: ONLY LEFT WALL PRESENT (Symmetric Shimmy Logic)
+  // =========================================================================
+  else if (leftDist != 999 && rightDist == 999) { 
+    while (true) {
+      // 1. Lean Right and measure
+      stepRight(calibrateStep);
+      delay(50); 
+      sensorReadings(); 
+      float tempLeftDist1 = leftDist;
+
+      // 2. Lean Left (crossing center to the other side) and measure
+      stepLeft(calibrateStep * 2);
+      delay(50);
+      sensorReadings(); 
+      float tempLeftDist2 = leftDist;
+
+      // 3. Return to our current center position
+      stepRight(calibrateStep);
+      delay(50);
+
+      // Calculate the slope
+      float diff = tempLeftDist2 - tempLeftDist1;
+
+      // SUCCESS CONDITION: Leaning left vs right yields the same distance
+      if (abs(diff) < 0.5) { 
+        break; 
+      }
+
+      // 4. Adjust our center line towards the shorter distance
+      // (If diff > 0, lean right was closer to the minimum perpendicular distance)
+      if (diff > 0) {
+        stepRight(smallAdjustment);
+      } else if (diff < 0) {
+        stepLeft(smallAdjustment); 
+      }
+    }
+  }
+
+  // Final hardware safety: Clear out motor outputs upon exiting
+  analogWrite(PWMA, 0);
+  analogWrite(PWMB, 0);
+}
+
+
+void stepRight(int step) {
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, HIGH);
+
+  leftTicks = 0;
+  rightTicks = 0;
+
+  while (leftTicks < step || abs(rightTicks) < step) {
+
+    int error = leftTicks - abs(rightTicks);
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+  Brake();
+}
+
+void stepLeft(int step) {
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  leftTicks = 0;
+  rightTicks = 0;
+
+  while (abs(leftTicks) < step || rightTicks < step) {
+
+    int error = abs(leftTicks) - rightTicks;
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+  Brake();
+}
