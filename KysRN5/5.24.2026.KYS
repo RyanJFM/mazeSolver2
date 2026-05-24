@@ -1,0 +1,615 @@
+#include <SharpDistSensor.h>
+#include <Wire.h>
+#include <MPU6050.h>
+
+// determine pins
+
+// when robot is in centre the values for left and right sharp irs are 5.5 cm assuming a cell is 18cm x 18cm
+
+// left motor
+const int PWMA = 5;
+const int AIN1 = 7;
+const int AIN2 = 8;
+// left motor encoder
+const int leftEncoderPhaseA = 2; // hardware interrupt 0
+const int leftEncoderPhaseB = 4; // direction logic 
+
+// right motor
+const int PWMB = 6;
+const int BIN1 = 9;
+const int BIN2 = 10;
+// right motor encoder
+const int rightEncoderPhaseA = 3;
+const int rightEncoderPhaseB = 11;
+
+// pwm signal speed for motors
+const int speed = 60;
+
+// encoder ticks
+volatile long leftTicks = 0;
+volatile long rightTicks = 0;
+
+// sharp IR
+SharpDistSensor sensorFront(A0, 5);
+SharpDistSensor sensorLeft(A2, 5);
+SharpDistSensor sensorRight(A1, 5);
+
+// control system
+// PID Control System
+const float Kp = 10.5; 
+const float Ki = 0.05; // Keep this VERY small to start!
+const float Kd = 2.0;  // Usually larger than Ki, helps dampen wobbles
+
+// Memory variables for PID
+float integralError = 0.0;
+float previousError = 0.0;
+
+// adjust 
+const float calibrateStep = 10;
+const float smallAdjustment = 5;
+
+//----- Gyro
+MPU6050 mpu;
+float angleZ       = 0;
+float gyroZ_offset = 0;
+unsigned long lastTime = 0;
+void calibrate(int samples = 500);
+const float Kp_gyro = 2.0;  // tune this up/down if adjust() overshoots or is too slow
+//-----
+
+// sensor readings
+float frontDist = 0.0;
+float leftDist = 0.0;
+float rightDist = 0.0;
+
+// step size
+int n = 280;  //30 cm = 500
+// turn size
+int m = 140;
+
+// 
+
+// front wall dist
+const float wallDistThreshold = 4.5;
+const float frontWallDistThreshold = 5.0;
+
+
+void setup() {
+  // initialize pins for motors
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  // Initialize encoder pins
+  pinMode(leftEncoderPhaseA, INPUT);
+  pinMode(leftEncoderPhaseB, INPUT);
+  pinMode(rightEncoderPhaseA, INPUT);
+  pinMode(rightEncoderPhaseB, INPUT);
+
+  // whenever the encoder ticks are rising pause the main code and run counting functions
+  attachInterrupt(digitalPinToInterrupt(leftEncoderPhaseA), countLeft, RISING);
+  attachInterrupt(digitalPinToInterrupt(rightEncoderPhaseA), countRight, RISING);
+
+  // set up sensors
+  sensorFront.setModel(SharpDistSensor::GP2Y0A51SK0F_5V_DS);
+  sensorLeft.setModel(SharpDistSensor::GP2Y0A51SK0F_5V_DS);
+  sensorRight.setModel(SharpDistSensor::GP2Y0A51SK0F_5V_DS);
+
+  //====
+
+  Serial.begin(9600);
+  Wire.begin();
+  mpu.initialize();
+
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 connection failed!");
+    while (1);
+  }
+  calibrate();       // keep robot still during this
+  lastTime = millis();
+
+  //====
+
+}
+
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  goForward();
+  Brake();
+  if (frontDist < frontWallDistThreshold) {
+    turnLeft(); // Robot spins roughly 90 degrees
+    Brake();     // Full stop   
+    adjust();
+    Brake();
+  } 
+
+}
+
+void goForward() {
+  
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  leftTicks = 0;
+  rightTicks = 0;
+
+  while (leftTicks < n && rightTicks < n) {
+
+    // GYROO
+    updateGyro();
+    
+    // This part is added for shitty testin
+    sensorReadings();
+    if (frontDist < frontWallDistThreshold) { 
+      break;
+    }
+    
+    float error = centreAdjustment();
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+
+  }
+}
+/*
+float centreAdjustment() {
+
+  int adjustment = 0;
+
+    // Both walls are present
+    if (leftDist < 14.0 && rightDist < 14.0) {
+      float sensorError = leftDist - rightDist;
+      adjustment = sensorError * Kp;
+    }
+    
+    // Only right wall is present (Left opening/doorway)
+    else if (leftDist == 999 && rightDist < 14.0) {
+      float rightWallError = wallDistThreshold - rightDist; 
+      adjustment = rightWallError * Kp;
+    }
+    
+    // only left wall is present (Right opening/doorway)
+    else if (leftDist < 14.0 && rightDist == 999) {
+      float leftWallError = leftDist - wallDistThreshold;
+      adjustment = leftWallError * Kp;
+    }
+  
+    else {
+      adjustment = leftTicks - rightTicks;
+    }
+
+    return adjustment;
+}
+*/
+
+float centreAdjustment() {
+  int adjustment = 0;
+
+  // Both walls are present (Full PID Control)
+  if (leftDist < 14.0 && rightDist < 14.0) {
+    float error = leftDist - rightDist;
+
+    // 1. Proportional (Current)
+    float P = error * Kp;
+
+    // 2. Integral (Past)
+    integralError += error;
+    // Anti-windup: Don't let the memory build up to dangerous levels
+    integralError = constrain(integralError, -50.0, 50.0); 
+    float I = integralError * Ki;
+
+    // 3. Derivative (Future)
+    float derivative = error - previousError;
+    previousError = error; // Save current error for the next loop
+    float D = derivative * Kd;
+
+    // The final PID output
+    adjustment = P + I + D;
+  } 
+  
+  // Only Right Wall Present
+  else if (leftDist == 999 && rightDist < 14.0) {
+    float rightWallError = wallDistThreshold - rightDist; 
+    adjustment = rightWallError * Kp;
+    
+    // Reset PID memory so it doesn't ruin the next hallway
+    integralError = 0; 
+    previousError = 0;
+  } 
+  
+  // Only Left Wall Present
+  else if (leftDist < 14.0 && rightDist == 999) {
+    float leftWallError = leftDist - wallDistThreshold;
+    adjustment = leftWallError * Kp;
+    
+    // Reset PID memory
+    integralError = 0; 
+    previousError = 0;
+  } 
+  
+  // No walls
+  else {
+    adjustment = leftTicks - rightTicks;
+    
+    // Reset PID memory
+    integralError = 0; 
+    previousError = 0;
+  }
+
+  return adjustment;
+}
+
+void sensorReadings() {
+  // 1. Create arrays (lists) to hold 5 raw readings each
+  float rawFrontList[5];
+  float rawLeftList[5];
+  float rawRightList[5];
+
+  // 2. Collect 5 readings and append them to the arrays
+  for (int i = 0; i < 5; i++) {
+    rawFrontList[i] = sensorFront.getDist() / 10.0;
+    rawLeftList[i]  = sensorLeft.getDist()  / 10.0;
+    rawRightList[i] = sensorRight.getDist() / 10.0;
+    
+    // Give the IR hardware a micro-moment (1ms) to update its beam between reads
+    delay(1); 
+  }
+
+  // 3. Sum up all the values in the arrays
+  float sumFront = 0.0;
+  float sumLeft  = 0.0;
+  float sumRight = 0.0;
+
+  for (int i = 0; i < 5; i++) {
+    sumFront += rawFrontList[i];
+    sumLeft  += rawLeftList[i];
+    sumRight += rawRightList[i];
+  }
+
+  // 4. Calculate the averages
+  float avgFront = sumFront / 5.0;
+  float avgLeft  = sumLeft  / 5.0;
+  float avgRight = sumRight / 5.0;
+
+  // 5. Map the final averaged values
+  frontDist = mapFloat(avgFront, 2.9, 5.6, 4.0, 7.0);
+  leftDist  = mapFloat(avgLeft,  3.0, 6.0, 4.0, 7.0);
+  rightDist = mapFloat(avgRight, 2.7, 5.1, 3.5, 6.5); //4.0 , 7.0 prev values
+
+  // 6. Set condition for wall to not exist
+  if (frontDist > 7.0) { frontDist = 999; }
+  if (leftDist > 7.0)  { leftDist = 999;  }
+  if (rightDist > 7.0) { rightDist = 999; }
+}
+
+float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void Brake() {
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, HIGH);
+
+  // reset encoder values
+  leftTicks = 0;
+  rightTicks = 0;
+
+  analogWrite(PWMA, 0);
+  analogWrite(PWMB, 0);
+
+  delay(500);
+}
+
+// ─── TURN RIGHT ──────────────────────────────────────────
+void turnRight() {
+  angleZ = 0;  // fresh reference
+  lastTime = millis();
+
+
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, HIGH);
+
+  leftTicks  = 0;
+  rightTicks = 0;
+
+  while (abs(angleZ) < 70.0) {
+    updateGyro();
+
+    // slow down in last 20 degrees to avoid overshoot
+    float remaining   = 90.0 - angleZ;
+    int currentSpeed  = (remaining < 20.0) ? speed / 2 : speed;
+
+    int error = leftTicks - abs(rightTicks);
+
+    int leftMotorSpeed  = constrain(currentSpeed - error, 0, 255);
+    int rightMotorSpeed = constrain(currentSpeed + error, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+
+  Brake();
+  angleZ = 0;  // reset for next move
+}
+
+// ─── TURN LEFT ───────────────────────────────────────────
+void turnLeft() {
+  angleZ = 0;  // fresh reference
+  lastTime = millis();
+
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, HIGH);
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  leftTicks  = 0;
+  rightTicks = 0;
+
+  while (abs(angleZ) < 70.0) {
+    updateGyro();
+
+    // slow down in last 20 degrees to avoid overshoot
+    float remaining   = 90.0 - abs(angleZ);
+    int currentSpeed  = (remaining < 20.0) ? speed / 2 : speed;
+
+    int error = abs(leftTicks) - rightTicks;
+
+    int leftMotorSpeed  = constrain(currentSpeed - error, 0, 255);
+    int rightMotorSpeed = constrain(currentSpeed + error, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+
+  Brake();
+  angleZ = 0;  // reset for next move
+}
+
+
+void countLeft() {
+  // Check Phase B to see if we are going forward or backward
+  if (digitalRead(leftEncoderPhaseB) == HIGH) {
+    leftTicks++;
+  } else {
+    leftTicks--;
+  }
+}
+
+void countRight() {
+  // check if motor spin forward or backward
+  if (digitalRead(rightEncoderPhaseB) == HIGH) {
+    rightTicks++;
+  } else {
+    rightTicks--;
+  }
+}
+
+// Adjust --------- Ryan's
+/*
+void adjust() {
+  sensorReadings();
+
+
+  // =========================================================================
+  // CONDITION 2: ONLY RIGHT WALL PRESENT (Your Shimmy Logic)
+  // =========================================================================
+  if (leftDist == 999 && rightDist != 999) { 
+    while (true) {
+      // 1. Lean Right and measure
+      stepRight(calibrateStep);
+      delay(50); 
+      sensorReadings(); 
+      float tempRightDist1 = rightDist;
+
+      // 2. Lean Left (crossing center to the other side) and measure
+      stepLeft(calibrateStep * 2);
+      delay(50);
+      sensorReadings(); 
+      float tempRightDist2 = rightDist;
+
+      // 3. Return to our current center position
+      stepRight(calibrateStep);
+      delay(50);
+
+      // Calculate the slope
+      float diff = tempRightDist2 - tempRightDist1;
+
+      // SUCCESS CONDITION: Leaning left vs right yields the same distance
+      if (abs(diff) < 0.5) { 
+        break; 
+      }
+
+      // 4. Adjust our center line towards the shorter distance
+      if (diff > 0) {
+        stepRight(smallAdjustment);
+      } else if (diff < 0) {
+        stepLeft(smallAdjustment); 
+      }
+    }
+  }
+
+  // =========================================================================
+  // CONDITION 3: ONLY LEFT WALL PRESENT (Symmetric Shimmy Logic)
+  // =========================================================================
+  else if (leftDist != 999 && rightDist == 999) { 
+    while (true) {
+      // 1. Lean Right and measure
+      stepRight(calibrateStep);
+      delay(50); 
+      sensorReadings(); 
+      float tempLeftDist1 = leftDist;
+
+      // 2. Lean Left (crossing center to the other side) and measure
+      stepLeft(calibrateStep * 2);
+      delay(50);
+      sensorReadings(); 
+      float tempLeftDist2 = leftDist;
+
+      // 3. Return to our current center position
+      stepRight(calibrateStep);
+      delay(50);
+
+      // Calculate the slope
+      float diff = tempLeftDist2 - tempLeftDist1;
+
+      // SUCCESS CONDITION: Leaning left vs right yields the same distance
+      if (abs(diff) < 0.5) { 
+        break; 
+      }
+
+      // 4. Adjust our center line towards the shorter distance
+      // (If diff > 0, lean right was closer to the minimum perpendicular distance)
+      if (diff > 0) {
+        stepRight(smallAdjustment);
+      } else if (diff < 0) {
+        stepLeft(smallAdjustment); 
+      }
+    }
+  }
+
+  // Final hardware safety: Clear out motor outputs upon exiting
+  analogWrite(PWMA, 0);
+  analogWrite(PWMB, 0);
+}
+
+
+void stepRight(int step) {
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, HIGH);
+
+  leftTicks = 0;
+  rightTicks = 0;
+
+  while (leftTicks < step || abs(rightTicks) < step) {
+
+    int error = leftTicks - abs(rightTicks);
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+  Brake();
+}
+
+void stepLeft(int step) {
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  leftTicks = 0;
+  rightTicks = 0;
+
+  while (abs(leftTicks) < step || rightTicks < step) {
+
+    int error = abs(leftTicks) - rightTicks;
+
+    int leftMotorSpeed = speed - error;
+    int rightMotorSpeed = speed + error;
+
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, 255);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, 255);
+
+    analogWrite(PWMA, leftMotorSpeed);
+    analogWrite(PWMB, rightMotorSpeed);
+  }
+  Brake();
+}
+*/
+
+//-----------------
+
+
+// adjust by gemini + gyro
+
+void calibrate(int samples = 500) {
+  Serial.println("Calibrating... keep robot STILL");
+  long sum = 0;
+  for (int i = 0; i < samples; i++) {
+    int16_t gx, gy, gz;
+    mpu.getRotation(&gx, &gy, &gz);
+    sum += gz;
+    delay(3);
+  }
+  gyroZ_offset = sum / (float)samples;
+  Serial.print("Gyro offset: ");
+  Serial.println(gyroZ_offset);
+}
+
+// 2. Continuous Background Listener: Tracks running angle in degrees
+void updateGyro() {
+  int16_t gx, gy, gz;
+  mpu.getRotation(&gx, &gy, &gz);
+
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0;
+  lastTime = now;
+
+  float gyroZ_dps = (gz - gyroZ_offset) / 131.0;
+  if (abs(gyroZ_dps) < 0.5) gyroZ_dps = 0;  // dead zone
+
+  angleZ += gyroZ_dps * dt;
+}
+
+// 3. New Math-Based Snap Alignment Function
+void adjust() {
+  // Find closest 90-degree heading relative to where we booted up
+  float targetAngle = round(angleZ / 90.0) * 90.0;
+  float angleError = targetAngle - angleZ;
+
+  // Keep spinning on the spot until error drops under 1.0 degree
+  while (abs(angleError) > 1.0) {
+    updateGyro(); // Keep updating currentAngle dynamically as we move!
+    angleError = targetAngle - angleZ;
+
+    int pivotSpeed = angleError * Kp_gyro;
+    
+    // Motor kick-start: prevent stall near the zero mark
+    if (pivotSpeed > 0 && pivotSpeed < 35)  pivotSpeed = 35;
+    if (pivotSpeed < 0 && pivotSpeed > -35) pivotSpeed = -35;
+    pivotSpeed = constrain(pivotSpeed, -80, 80); 
+
+    if (pivotSpeed > 0) {
+      // Pivot counter-clockwise (Left)
+      digitalWrite(AIN1, LOW);  digitalWrite(AIN2, HIGH);
+      digitalWrite(BIN1, HIGH); digitalWrite(BIN2, LOW);
+    } else {
+      // Pivot clockwise (Right)
+      digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW);
+      digitalWrite(BIN1, LOW);  digitalWrite(BIN2, HIGH);
+    }
+
+    analogWrite(PWMA, abs(pivotSpeed));
+    analogWrite(PWMB, abs(pivotSpeed));
+  }
+  
+  Brake(); // Lock wheels once square
+}
