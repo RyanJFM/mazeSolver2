@@ -74,7 +74,7 @@ def main():
 
     # Grid contraints: 5 x 5
     width, height = 5, 5
-    center_x, center_y = 2, 2
+    center_x, center_y = width // 2, height // 2  # 2, 2
 
     # Initialize distance map
     distances = [[0 for _ in range(height)] for _ in range(width)]
